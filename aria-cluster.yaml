@@ -1,0 +1,93 @@
+cluster_name: aria-ray-cluster
+provider:
+  type: aws
+  region: us-east-2
+  availability_zone: us-east-2a
+
+auth:
+  ssh_user: ubuntu
+  ssh_private_key: ~/.ssh/ryan-mac.pem
+
+max_workers: 50
+idle_timeout_minutes: 10
+
+available_node_types:
+  head_node:
+    node_config:
+      InstanceType: t3.xlarge
+      ImageId: ami-0a9841efd2cf227e3           # Ubuntu 22.04 x86_64
+      KeyName: ryan-mac
+      SubnetId: subnet-02fbc81414d827515
+      SecurityGroupIds: [sg-01cabcd4f45211888]
+      IamInstanceProfile:
+        Arn: arn:aws:iam::654654140494:instance-profile/ray-mps-profile
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs: {VolumeSize: 50}
+    resources: {CPU: 4}
+    min_workers: 0
+    max_workers: 0
+
+  worker_node:
+    node_config:
+      InstanceType: c5.9xlarge
+      ImageId: ami-0a9841efd2cf227e3
+      KeyName: ryan-mac
+      SubnetId: subnet-02fbc81414d827515
+      SecurityGroupIds: [sg-01cabcd4f45211888]
+      IamInstanceProfile:
+        Arn: arn:aws:iam::654654140494:instance-profile/ray-mps-profile
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs: {VolumeSize: 50}
+    resources: {CPU: 36}
+    min_workers: 0
+    max_workers: 50
+
+head_node_type: head_node
+
+# ── bootstrap ───────────────────────────────────────────────
+initialization_commands:
+  - sudo apt-get update -y
+  - sudo apt-get install -y python3-pip python3-dev git fuse3
+  - wget -qO ~/mount-s3.deb https://s3.amazonaws.com/mountpoint-s3-release/latest/x86_64/mount-s3.deb
+  - sudo apt-get install -y ~/mount-s3.deb
+  - mount-s3 --version
+  - sudo pip3 install --upgrade ray boto3
+  - sudo apt-get install -y libgl1
+
+setup_commands:
+  - sudo mkdir -p /mnt/raw /mnt/processed
+  - |
+      if mountpoint -q /mnt/raw; then
+        echo "/mnt/raw already mounted"
+      else
+        sudo mount-s3 \
+          s3://rldb/raw/ /mnt/raw \
+          --allow-other \
+          --uid=$(id -u ubuntu) \
+          --gid=$(id -g ubuntu) \
+          --file-mode=664 --dir-mode=775
+      fi
+  - |
+      if mountpoint -q /mnt/processed; then
+        echo "/mnt/processed already mounted"
+      else
+        sudo mount-s3 \
+          s3://rldb/processed/ /mnt/processed \
+          --allow-other \
+          --uid=$(id -u ubuntu) \
+          --gid=$(id -g ubuntu) \
+          --file-mode=664 --dir-mode=775
+      fi
+  - |
+      git -C ~/EgoVerse fetch origin aws_autoproc --quiet
+      git -C ~/EgoVerse checkout aws_autoproc
+      git -C ~/EgoVerse pull --ff-only --quiet
+      git -C ~/EgoVerse submodule update --init --recursive --quiet
+  - |
+      (crontab -l 2>/dev/null | grep -v run_aria_conversion.py ; \
+       echo 'CRON_TZ=America/New_York'; \
+       echo '0 16 * * * /usr/bin/python3 ~/EgoVerse/egomimic/scripts/aria_process/run_aria_conversion.py >> ~/aria_conversion.log 2>&1') \
+       | crontab -
+  - crontab -l
