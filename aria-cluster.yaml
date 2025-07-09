@@ -1,9 +1,11 @@
+# ───────────────── aria-ray-cluster.yaml ─────────────────
 cluster_name: aria-ray-cluster
+
 provider:
   type: aws
   region: us-east-2
   availability_zone: us-east-2a
-  cache_stopped_nodes: false
+  cache_stopped_nodes: false         # don't re-use stopped VMs
 
 auth:
   ssh_user: ubuntu
@@ -16,7 +18,7 @@ available_node_types:
   head_node:
     node_config:
       InstanceType: m5a.2xlarge
-      ImageId: ami-0def8bb9d7dcec6d0        # Ubuntu 22.04 x86_64
+      ImageId: ami-0def8bb9d7dcec6d0        # Ubuntu 22.04
       KeyName: ryan-mac
       SubnetId: subnet-02fbc81414d827515
       SecurityGroupIds: [sg-01cabcd4f45211888]
@@ -24,8 +26,8 @@ available_node_types:
         Arn: arn:aws:iam::654654140494:instance-profile/ray-mps-profile
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
-          Ebs: {VolumeSize: 50}
-    resources: {CPU: 8}
+          Ebs: { VolumeSize: 50 }
+    resources: { CPU: 8 }
     min_workers: 0
     max_workers: 0
 
@@ -40,61 +42,61 @@ available_node_types:
         Arn: arn:aws:iam::654654140494:instance-profile/ray-mps-profile
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
-          Ebs: {VolumeSize: 50}
-    resources: 
-      CPU: 36
-      memory: 77627043840
+          Ebs: { VolumeSize: 50 }
+    resources: { CPU: 36 , memory: 77627043840 }
     min_workers: 0
     max_workers: 50
 
 head_node_type: head_node
 
-# ── bootstrap ───────────────────────────────────────────────
+# ───────── PACKAGES + MOUNTS ─────────────────────────────
 initialization_commands:
   - sudo apt-get update -y
-  - sudo apt-get install -y python3-pip python3-dev git fuse3
-  - wget -qO ~/mount-s3.deb https://s3.amazonaws.com/mountpoint-s3-release/latest/x86_64/mount-s3.deb
-  - sudo apt-get install -y ~/mount-s3.deb
-  - mount-s3 --version
+  - sudo apt-get install -y python3-pip python3-dev git fuse3              # fuse3 first
+  - sudo apt-get install -y s3fs                                          # ← NEW
   - sudo pip3 install --upgrade ray boto3
   - sudo apt-get install -y libgl1
 
 setup_commands:
   - sudo mkdir -p /mnt/raw /mnt/processed
+
   - |
       if mountpoint -q /mnt/raw; then
         echo "/mnt/raw already mounted"
       else
-        sudo mount-s3 \
-          s3://rldb/raw/ /mnt/raw \
-          --allow-other \
-          --allow-delete \
-          --allow-overwrite \
-          --uid=$(id -u ubuntu) \
-          --gid=$(id -g ubuntu) \
-          --file-mode=777 --dir-mode=777
+        sudo s3fs  rldb:/raw       /mnt/raw \
+          -o ro \
+          -o url=https://s3.us-east-2.amazonaws.com \
+          -o iam_role=auto \
+          -o allow_other \
+          -o umask=000
       fi
+
   - |
       if mountpoint -q /mnt/processed; then
         echo "/mnt/processed already mounted"
       else
-        sudo mount-s3 \
-          s3://rldb/processed/ /mnt/processed \
-          --allow-other \
-          --allow-delete \
-          --allow-overwrite \
-          --uid=$(id -u ubuntu) \
-          --gid=$(id -g ubuntu) \
-          --file-mode=777 --dir-mode=777
+        sudo s3fs  rldb:/processed /mnt/processed \
+          -o url=https://s3.us-east-2.amazonaws.com \
+          -o iam_role=auto \
+          -o allow_other \
+          -o umask=000 \
+          -o use_path_request_style \
+          -o multipart_size=64 \
+          -o parallel_count=20 \
+          -o del_cache \
+          -o complement_stat
       fi
+
   - |
       git -C ~/EgoVerse fetch origin aws_autoproc --quiet
       git -C ~/EgoVerse checkout aws_autoproc
       git -C ~/EgoVerse pull --quiet
       git -C ~/EgoVerse submodule update --init --recursive --quiet
+
   - |
       (crontab -l 2>/dev/null | grep -v run_aria_conversion.py ; \
        echo 'CRON_TZ=America/New_York'; \
-       echo '30 18 * * * /usr/bin/python3 ~/EgoVerse/egomimic/scripts/aria_process/run_aria_conversion.py >> ~/aria_conversion.log 2>&1') \
+       echo '0 16 * * * /usr/bin/python3 ~/EgoVerse/egomimic/scripts/aria_process/run_aria_conversion.py >> ~/aria_conversion.log 2>&1') \
        | crontab -
   - crontab -l
